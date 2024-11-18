@@ -1,0 +1,357 @@
+---
+title: "Sesion2"
+author: "Gabriel Oliveros" 
+output: html_document
+date: "2024-11-06"
+---
+
+# CREAR UN REGISTRO DE LIMPIEZA
+
+```{r}
+
+rm(list=ls(all=T))
+
+```
+
+
+```{r}
+
+library(cleaningtools)
+library(dplyr)
+
+my_raw_dataset <- cleaningtools::cleaningtools_raw_data
+my_kobo_survey <- cleaningtools::cleaningtools_survey
+my_kobo_choice <- cleaningtools::cleaningtools_choices
+
+# Duplicados, outliers, chequeo de valores de variable
+more_logs <- my_raw_dataset %>% 
+  check_duplicate(uuid_column = "X_uuid") %>% 
+  check_soft_duplicates(uuid_column = "X_uuid", kobo_survey = my_kobo_survey, sm_separator = ".") %>%
+  check_outliers(uuid_column = "X_uuid") %>%
+  check_value(uuid_column = "X_uuid") 
+
+View(more_logs$potential_outliers)
+
+View(more_logs$flagged_values)
+
+# Calcula la duración de la encuesta
+more_logs$checked_dataset <- more_logs$checked_dataset %>% 
+  add_duration(uuid_column = "X_uuid", start_column = "X.U.FEFF.start", end_column = "end")
+
+# Duración de la encuesta
+more_logs <- more_logs %>% 
+  check_duration(column_to_check = "duration", uuid_column = "X_uuid")
+
+"Solo entrega un log, pero no muestra potenciales encuestas muy largas o muy cortas"
+dl = more_logs$duration_log
+View(dl)
+
+"Pudiera combinarse con la detección de outliers para evaluar encuestas demasiado largas o cortas"
+ch_out = check_outliers(dl, uuid_column="uuid")
+View(ch_out$potential_outliers)
+
+
+# Chequeo de campos Otro. Extracción de columnas de texto
+"Esto detecta columnas de texto, pero no sirve si tengo una columna de marca u otro texto que no corresponde a Otro"
+other_columns_to_check <- my_kobo_survey %>% 
+  filter(type == "text") %>% 
+  filter(name %in% names(my_raw_dataset)) %>%
+  pull(name) 
+
+more_logs <- more_logs %>% 
+  check_others(uuid_column = "X_uuid", columns_to_check = other_columns_to_check) 
+
+View(more_logs$other_log)
+
+# Chequeos lógicos
+logical_check_list <- readxl::read_excel("./inputs/01 - example - check_list.xlsx")
+
+more_logs <- more_logs %>%
+  check_logical_with_list(uuid_column = "X_uuid",
+                          list_of_check = logical_check_list,
+                          check_id_column = "check_id",
+                          check_to_perform_column = "check_to_perform",
+                          columns_to_clean_column = "columns_to_clean",
+                          description_column = "description")
+
+View(more_logs$logical_all)
+
+```
+
+
+```{r}
+
+names(more_logs)
+
+# La función create_combined_log combina todos los registros de una lista en uno.
+# Muestra el cleaning_log unificado
+my_combined_log <- create_combined_log(more_logs)
+
+View(my_combined_log$cleaning_log)
+
+my_combined_log <- my_combined_log %>% 
+  add_info_to_cleaning_log(dataset_uuid_column = "X_uuid", 
+                           information_to_add = "enumerator_num")
+
+View(my_combined_log$cleaning_log)
+
+# Crea el dataset en formato para la sede 
+"sería apreciable crear la carpeta output si no existe"
+"El cleaning_log tiene un color para cada problema. Quizá sea pertinente hacerlo para cada uuid y
+ver todos los problemas asociados a una encuesta, perdiendo la posibilidad de filtrar por problema"
+"El path no funciona con ../outputs"
+create_xlsx_cleaning_log(my_combined_log,
+                         sm_dropdown_type = "logical",
+                         output_path =  "./outputs/01 - example - cleaning-log-no-kobo.xlsx")
+
+create_xlsx_cleaning_log(my_combined_log,
+                         kobo_survey = my_kobo_survey,
+                         kobo_choices = my_kobo_choice,
+                         use_dropdown = T,
+                         sm_dropdown_type = "logical",
+                         output_path =  "./outputs/02 - example - cleaning-log-with-kobo.xlsx")
+
+```
+
+
+# CREAR UN CONJUNTO DE DATOS LIMPIO
+
+```{r}
+
+my_filled_log <- readxl::read_excel("./inputs/02 - example - cleaning-log-with-kobo - filled.xlsx", sheet = 2)
+"En el caso de duración de la encuesta solo se puede aplicar una acción (eliminar o conservar), pero no se puede aplicar un new_value"
+"Para este tipo de issue 'primary_livelihood is employment but expenses less than 200000' tampoco se puede emplear un nuevo valor sino que hay que aplicar una acción (estandarizar, reclasificar, o borrar la respuesta"
+"Tomando en cuenta esto, en el log lo más conveniente sería agregar una columna 'action' que indique el tipo de cambio realizado (change_value, delete_survey, delete_value, reclassify, standardize) y en new_value indicar un nuevo si aplica, y si no agregar 'no_aplica' o 'n/a'"
+"Sería bueno indicar en la práctica que se deben completar las columnas change_type y new_value para que no quede posibilidad de llenar solo new_value sin llenar change_type"
+
+# La funcion review_cleaning_log revisa cómo se rellenó el registro de limpieza.
+check_log_results <- review_cleaning_log(raw_dataset = my_raw_dataset,
+                                        raw_data_uuid_column = "X_uuid",
+                                        cleaning_log = my_filled_log, 
+                                        cleaning_log_uuid_column = "uuid",
+                                        cleaning_log_question_column = "question",
+                                        cleaning_log_new_value_column = "new_value",
+                                        cleaning_log_change_type_column = "change_type",
+                                        change_response_value = "change_response")
+
+# Para crear el conjunto de datos limpio, la función create_clean_data necesita el conjunto de datos bruto y el registro de limpieza completado.
+my_clean_data <- create_clean_data(raw_dataset = my_raw_dataset,
+                                   raw_data_uuid_column = "X_uuid",
+                                   cleaning_log = my_filled_log, 
+                                   cleaning_log_uuid_column = "uuid",
+                                   cleaning_log_question_column = "question",
+                                   cleaning_log_new_value_column = "new_value",
+                                   cleaning_log_change_type_column = "change_type")
+
+# en el registro de limpieza, se modifican ciertas columnas de opción multiple pero solo se registraron las modificaciones hechas a las columnas ficticias (TRUE/FALSE , 0/1 i.e. dummy variables).
+my_filled_log %>% 
+  filter(question == "primary_livelihood.employment", 
+         change_type == "change_response") %>% 
+  select(uuid, question, old_value, new_value)
+
+# La columna principal no fue modificada y por lo tanto, acorde al ejemplo anterior, ‘employment’ sigue marcado en la columna principal.
+my_clean_data %>% 
+  filter(X_uuid %in% c("eb3b9935-fa0b-4d54-8058-3b629f1421ad", "eec1f630-15d5-475e-a344-32bba74b32ea", "f1175d29-ce1f-43a7-b3d1-ee26cd1b8cdb")) %>% 
+  select(X_uuid,primary_livelihood, primary_livelihood.employment)
+
+# La función recreate_parent_column modifica la columna principal basandosé en las columnas ficticias.
+my_clean_data2 <- recreate_parent_column(dataset = my_clean_data,
+                                         uuid_column = "X_uuid",
+                                         kobo_survey = my_kobo_survey,
+                                         kobo_choices = my_kobo_choice,
+                                         sm_separator = ".", 
+                                         cleaning_log_to_append = my_filled_log)
+
+# Como se puede ver, la columna principal esta correcta y ‘employment’ ya no aparece como respuesta.
+my_clean_data2$data_with_fix_concat %>% 
+  filter(X_uuid %in% c("eb3b9935-fa0b-4d54-8058-3b629f1421ad", "eec1f630-15d5-475e-a344-32bba74b32ea", "f1175d29-ce1f-43a7-b3d1-ee26cd1b8cdb")) %>% 
+  select(X_uuid,primary_livelihood, primary_livelihood.employment)
+
+# Al haber especificado el parametro cleaning_log_to_append, los cambios hechos fueron añadidos al registro de limpieza.
+my_clean_data2$cleaning_log %>% 
+  filter(question == "primary_livelihood", 
+         uuid %in% c("eb3b9935-fa0b-4d54-8058-3b629f1421ad", "eec1f630-15d5-475e-a344-32bba74b32ea", "f1175d29-ce1f-43a7-b3d1-ee26cd1b8cdb")) %>% 
+  select(uuid, question, old_value, new_value)
+
+
+
+
+
+```
+
+# REVISAR LA LIMPIEZA
+
+
+```{r}
+
+rm(list=ls(all=T))
+
+```
+
+```{r}
+library(cleaningtools)
+library(dplyr)
+
+my_raw_dataset <- cleaningtools::cleaningtools_raw_data
+my_kobo_survey <- cleaningtools::cleaningtools_survey
+my_kobo_choice <- cleaningtools::cleaningtools_choices
+my_filled_log <- readxl::read_excel("./inputs/02 - example - cleaning-log-with-kobo - filled.xlsx", sheet = 2)
+
+my_clean_data <- create_clean_data(raw_dataset = my_raw_dataset,
+                                   raw_data_uuid_column = "X_uuid",
+                                   cleaning_log = my_filled_log, 
+                                   cleaning_log_uuid_column = "uuid",
+                                   cleaning_log_question_column = "question",
+                                   cleaning_log_new_value_column = "new_value",
+                                   cleaning_log_change_type_column = "change_type")
+
+my_clean_data2 <- recreate_parent_column(dataset = my_clean_data,
+                                         uuid_column = "X_uuid",
+                                         kobo_survey = my_kobo_survey,
+                                         kobo_choices = my_kobo_choice,
+                                         sm_separator = ".", 
+                                         cleaning_log_to_append = my_filled_log)
+
+# En el registro de limpieza, algunos valores de texto abierto se cambian a vacío. Algunas preguntas de texto abierto están vinculadas a una lógica condicional, es decir, ¿qué es X? Otro, por favor especifique. En algunos casos, algunos valores deben ser cambiados. En el siguiente ejemplo, se cambio el valor de water_supply_other_neighbourhoods_why* de la encuesta uuid 019bc718-c06a-46b8-bba8-c84f6c6efbd5.
+my_filled_log %>% 
+  filter(question == "water_supply_other_neighbourhoods_why", 
+         change_type == "blank_response")
+
+# En la herramienta KOBO se puede notar una logical condicional basada en la variable water_supply_other_neighbourhoods.
+my_kobo_survey %>% 
+  filter(name == "water_supply_other_neighbourhoods_why") %>% 
+  select(type, name, relevant)
+
+my_clean_data %>% 
+  filter(X_uuid == "019bc718-c06a-46b8-bba8-c84f6c6efbd5") %>% 
+  select(water_supply_other_neighbourhoods, water_supply_other_neighbourhoods_why   )
+
+# ¿Debe cambiarse el valor de water_supply_other_neighbourhoods? Depende de la pregunta y de la lógica condicional, pero es importante señalarlos para que se pueda tomar una decisión.
+review_other_log <- review_others(dataset = my_clean_data2$data_with_fix_concat,
+                                  uuid_column = "X_uuid", 
+                                  kobo_survey = my_kobo_survey, 
+                                  columns_not_to_check = "consent_telephone_number")
+
+# review_cleaning
+my_deletion_log <- my_clean_data2$cleaning_log %>% 
+  filter(change_type == "remove_survey")
+
+my_filled_log_no_deletion <- my_clean_data2$cleaning_log %>% 
+  filter(change_type != "remove_survey") %>% 
+  filter(!uuid %in% my_deletion_log$uuid)
+
+review_of_cleaning <- review_cleaning(raw_dataset = my_raw_dataset,
+                    raw_dataset_uuid_column = "X_uuid", 
+                    clean_dataset = my_clean_data2$data_with_fix_concat,
+                    clean_dataset_uuid_column = "X_uuid",
+                    cleaning_log = my_filled_log_no_deletion, 
+                    cleaning_log_uuid_column = "uuid",
+                    cleaning_log_question_column = "question",
+                    cleaning_log_new_value_column = "new_value",
+                    cleaning_log_change_type_column = "change_type", 
+                    cleaning_log_old_value_column = "old_value", 
+                    deletion_log = my_deletion_log, 
+                    deletion_log_uuid_column = "uuid"
+                    )
+
+"ATENCIÓN: review_of_cleaning resulta vacío"
+
+```
+
+# PRÁCTICA 1
+
+Exporte el registro de limpieza creado previamente. El registro anterior ya esta cargado.
+
+# Guarda el dataframe como un archivo RDS
+saveRDS(my_filled_log_no_deletion, file = "my_filled_log_no_deletion.rds")
+
+
+```{r}
+
+library(cleaningtools)
+library(dplyr)
+
+my_raw_dataset <- cleaningtools::cleaningtools_raw_data
+my_kobo_survey <- cleaningtools::cleaningtools_survey
+my_kobo_choice <- cleaningtools::cleaningtools_choices
+
+previous_exercise_log <- readRDS("./inputs/03 - exercise - previous_log.RDS")
+
+previous_exercise_log %>% names()
+
+previous_exercise_log %>% 
+  create_combined_log() %>%
+  create_xlsx_cleaning_log(output_path = "./outputs/03 - correction - cleaning_log.xlsx", 
+                           kobo_survey = my_kobo_survey,
+                           kobo_choices = my_kobo_choice,
+                           sm_dropdown_type = "logical",
+                           use_dropdown = TRUE)
+
+```
+
+# PRÁCTICA 2
+
+Cree los datos limpios a partir del conjunto de datos en bruto y del registro de limpieza completado.
+
+```{r}
+
+exercise_filled_log <- readxl::read_excel("./inputs/04 - exercise - cleaning_log - filled.xlsx", sheet = "cleaning_log")
+
+exercise_clean_dataset <- create_clean_data(raw_dataset = my_raw_dataset,
+                                            raw_data_uuid_column = "X_uuid",
+                                            cleaning_log = exercise_filled_log, 
+                                            cleaning_log_uuid_column = "uuid",
+                                            cleaning_log_question_column = "question",
+                                            cleaning_log_new_value_column = "new_value",
+                                            cleaning_log_change_type_column = "change_type")
+
+
+exercise_clean_dataset2 <- recreate_parent_column(exercise_clean_dataset,
+                                                  uuid_column = "X_uuid", 
+                                                  kobo_survey = my_kobo_survey,
+                                                  kobo_choices = my_kobo_choice,
+                                                  cleaning_log_to_append = exercise_filled_log)
+```
+
+# PRÁCTICA 3
+Revise la limpieza a continuación; si hay alguien más haciendo el ejercicio, puede intentar revisar la limpieza de esa persona.
+
+```{r}
+exercise3_clean_dataset <- readxl::read_excel("./inputs/05 - exercise - clean dataset for review.xlsx")
+
+exercise3_cleaning_log <- readxl::read_excel("./inputs/05 - exercise - clean dataset for review.xlsx", sheet = 2)
+
+exercise3_deletion_log <- exercise3_cleaning_log %>% 
+  filter(change_type == "remove_survey")
+
+exercise3_log_no_deletion <- exercise3_cleaning_log %>% 
+  filter(change_type != "remove_survey") %>% 
+  filter(!uuid %in% exercise3_deletion_log$uuid)
+
+review_of_cleaning <- review_cleaning(raw_dataset = my_raw_dataset,
+                                      raw_dataset_uuid_column = "X_uuid", 
+                                      clean_dataset = exercise3_clean_dataset,
+                                      clean_dataset_uuid_column = "X_uuid",
+                                      cleaning_log = exercise3_log_no_deletion, 
+                                      cleaning_log_uuid_column = "uuid",
+                                      cleaning_log_question_column = "question",
+                                      cleaning_log_new_value_column = "new_value",
+                                      cleaning_log_change_type_column = "change_type", 
+                                      cleaning_log_old_value_column = "old_value", 
+                                      deletion_log = exercise3_deletion_log, 
+                                      deletion_log_uuid_column = "uuid"
+)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
